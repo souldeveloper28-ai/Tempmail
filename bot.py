@@ -1,31 +1,35 @@
-import requests, random, string, sqlite3, re, asyncio, os
+import requests, random, string, sqlite3, re, os
 from html import unescape
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # ================= CONFIG =================
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # 👈 SECRET / ENV
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # SECRET / ENV
 API = "https://api.mail.tm"
 
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN environment variable not set")
+    raise RuntimeError("BOT_TOKEN not set")
 
 # ================= DB =================
 db = sqlite3.connect("bot.db", check_same_thread=False)
 cur = db.cursor()
 
-cur.execute("""CREATE TABLE IF NOT EXISTS users(
+cur.execute("""
+CREATE TABLE IF NOT EXISTS users(
 uid INTEGER PRIMARY KEY,
 email TEXT,
 password TEXT,
 token TEXT
-)""")
+)
+""")
 
-cur.execute("""CREATE TABLE IF NOT EXISTS seen(
+cur.execute("""
+CREATE TABLE IF NOT EXISTS seen(
 uid INTEGER,
 mid TEXT,
 PRIMARY KEY(uid, mid)
-)""")
+)
+""")
 db.commit()
 
 # ================= UTILS =================
@@ -72,20 +76,20 @@ def create_mail(retry=5):
     if "token" not in r:
         if retry > 0:
             return create_mail(retry - 1)
-        raise Exception("Token create failed")
+        raise RuntimeError("Token create failed")
 
     return email, password, r["token"]
 
 # ================= KEYBOARD =================
 def home_kb():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Generate New / 🗑 Delete", callback_data="new")],
+        [InlineKeyboardButton("➕ New / 🗑 Delete", callback_data="new")],
         [InlineKeyboardButton("🔄 Refresh", callback_data="refresh")]
     ])
 
 def read_kb(mid):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📖 Read Full Mail", callback_data=f"read_{mid}")]
+        [InlineKeyboardButton("📖 Read Mail", callback_data=f"read_{mid}")]
     ])
 
 # ================= START =================
@@ -97,14 +101,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cur.execute("DELETE FROM seen WHERE uid=?", (uid,))
     db.commit()
 
+    # remove old jobs
     for j in context.job_queue.jobs():
         if j.chat_id == uid:
             j.schedule_removal()
 
-    context.job_queue.run_repeating(notify, 4, chat_id=uid)
+    context.job_queue.run_repeating(notify, interval=4, chat_id=uid)
 
     await update.message.reply_text(
-        f"Your temporary email address:\n\n`{email}`",
+        f"Your temporary email:\n\n`{email}`",
         parse_mode="Markdown",
         reply_markup=home_kb()
     )
@@ -175,7 +180,7 @@ async def refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = get_user(q.from_user.id)
     try:
         await q.message.edit_text(
-            f"Your temporary email address:\n\n`{u['email']}`",
+            f"Your temporary email:\n\n`{u['email']}`",
             parse_mode="Markdown",
             reply_markup=home_kb()
         )
@@ -194,7 +199,7 @@ async def new_mail(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         await q.message.edit_text(
-            f"Your temporary email address:\n\n`{email}`",
+            f"Your temporary email:\n\n`{email}`",
             parse_mode="Markdown",
             reply_markup=home_kb()
         )
@@ -210,8 +215,8 @@ def main():
     app.add_handler(CallbackQueryHandler(new_mail, pattern="new"))
     app.add_handler(CallbackQueryHandler(read_mail, pattern="^read_"))
 
-    print("🤖 TempMail FAST Bot Running")
-    app.run_polling()
+    print("🤖 BOT RUNNING STABLE")
+    app.run_polling(close_loop=False)
 
 if __name__ == "__main__":
     main()

@@ -1,182 +1,216 @@
-import requests, random, string, os, sqlite3, asyncio
-from html import escape
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler
+import requests, random, string, sqlite3, re, asyncio, os
+from html import unescape
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # ================= CONFIG =================
-BOT_TOKEN = os.getenv("BOT_TOKEN") or "PUT_YOUR_BOT_TOKEN"
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # 👈 SECRET / ENV
 API = "https://api.mail.tm"
-DB_FILE = "users.db"
 
-# ================= DATABASE =================
-conn = sqlite3.connect(DB_FILE, check_same_thread=False)
-cur = conn.cursor()
-cur.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    uid INTEGER PRIMARY KEY,
-    email TEXT,
-    password TEXT,
-    token TEXT,
-    last_count INTEGER DEFAULT 0
-)
-""")
-conn.commit()
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN environment variable not set")
 
-# ================= HELPERS =================
-def rs(n=8):
+# ================= DB =================
+db = sqlite3.connect("bot.db", check_same_thread=False)
+cur = db.cursor()
+
+cur.execute("""CREATE TABLE IF NOT EXISTS users(
+uid INTEGER PRIMARY KEY,
+email TEXT,
+password TEXT,
+token TEXT
+)""")
+
+cur.execute("""CREATE TABLE IF NOT EXISTS seen(
+uid INTEGER,
+mid TEXT,
+PRIMARY KEY(uid, mid)
+)""")
+db.commit()
+
+# ================= UTILS =================
+def rand(n=8):
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=n))
 
-def headers(token):
-    return {"Authorization": f"Bearer {token}"}
+def clean_html(html):
+    html = re.sub(r"<br\s*/?>", "\n", html)
+    html = re.sub(r"</p>", "\n\n", html)
+    html = re.sub(r"<.*?>", "", html)
+    return unescape(html)
 
-def create_mailbox():
-    domain = requests.get(f"{API}/domains").json()["hydra:member"][0]["domain"]
-    email = f"{rs()}@{domain}"
-    password = rs(10)
-    requests.post(f"{API}/accounts", json={"address": email, "password": password})
-    token = requests.post(
-        f"{API}/token",
-        json={"address": email, "password": password}
-    ).json()["token"]
-    return email, password, token
+def otp(text):
+    m = re.findall(r"\b\d{4,8}\b", text or "")
+    return m[0] if m else None
 
-def get_msgs(token):
-    return requests.get(
-        f"{API}/messages",
-        headers=headers(token)
-    ).json().get("hydra:member", [])
+def esc(t):
+    return re.sub(r'([_*[\]()~`>#+-=|{}.!])', r'\\\1', t or "")
 
-def main_kb():
+def get_user(uid):
+    cur.execute("SELECT email,password,token FROM users WHERE uid=?", (uid,))
+    r = cur.fetchone()
+    return None if not r else {"email": r[0], "password": r[1], "token": r[2]}
+
+# ================= CREATE MAIL =================
+def create_mail(retry=5):
+    domain = random.choice(
+        requests.get(f"{API}/domains", timeout=10).json()["hydra:member"]
+    )["domain"]
+
+    email = f"{rand()}@{domain}"
+    password = rand(10)
+
+    requests.post(f"{API}/accounts", json={
+        "address": email,
+        "password": password
+    }, timeout=10)
+
+    r = requests.post(f"{API}/token", json={
+        "address": email,
+        "password": password
+    }, timeout=10).json()
+
+    if "token" not in r:
+        if retry > 0:
+            return create_mail(retry - 1)
+        raise Exception("Token create failed")
+
+    return email, password, r["token"]
+
+# ================= KEYBOARD =================
+def home_kb():
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("📥 Inbox", callback_data="inbox"),
-            InlineKeyboardButton("🔄 Refresh", callback_data="inbox")
-        ],
-        [
-            InlineKeyboardButton("🆕 New Mail", callback_data="newbox"),
-            InlineKeyboardButton("🗑 Delete", callback_data="clear")
-        ]
+        [InlineKeyboardButton("➕ Generate New / 🗑 Delete", callback_data="new")],
+        [InlineKeyboardButton("🔄 Refresh", callback_data="refresh")]
     ])
 
-# ================= BOT HANDLERS =================
-async def start(update, context):
-    uid = update.effective_user.id
-    cur.execute("SELECT email FROM users WHERE uid=?", (uid,))
-    row = cur.fetchone()
+def read_kb(mid):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📖 Read Full Mail", callback_data=f"read_{mid}")]
+    ])
 
-    if not row:
-        email, pw, token = create_mailbox()
-        cur.execute(
-            "INSERT INTO users(uid,email,password,token,last_count) VALUES(?,?,?,?,0)",
-            (uid, email, pw, token)
-        )
-        conn.commit()
-    else:
-        email = row[0]
+# ================= START =================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+
+    email, password, token = create_mail()
+    cur.execute("REPLACE INTO users VALUES (?,?,?,?)", (uid, email, password, token))
+    cur.execute("DELETE FROM seen WHERE uid=?", (uid,))
+    db.commit()
+
+    for j in context.job_queue.jobs():
+        if j.chat_id == uid:
+            j.schedule_removal()
+
+    context.job_queue.run_repeating(notify, 4, chat_id=uid)
 
     await update.message.reply_text(
-        f"📧 <b>Your Temp Mail</b>\n\n<code>{escape(email)}</code>",
-        parse_mode="HTML",
-        reply_markup=main_kb()
+        f"Your temporary email address:\n\n`{email}`",
+        parse_mode="Markdown",
+        reply_markup=home_kb()
     )
-
-async def inbox(update, context):
-    q = update.callback_query
-    await q.answer()
-    uid = q.from_user.id
-
-    cur.execute("SELECT token FROM users WHERE uid=?", (uid,))
-    row = cur.fetchone()
-    if not row:
-        await start(update, context)
-        return
-
-    msgs = get_msgs(row[0])
-    cur.execute("UPDATE users SET last_count=? WHERE uid=?", (len(msgs), uid))
-    conn.commit()
-
-    if not msgs:
-        await q.message.reply_text("📭 Inbox empty", reply_markup=main_kb())
-        return
-
-    text = "📥 <b>Inbox</b>\n\n"
-    buttons = []
-    for m in msgs[:7]:
-        text += escape(m.get("subject") or "No Subject") + "\n"
-        buttons.append([
-            InlineKeyboardButton("📖 Read", callback_data=f"read_{m['id']}")
-        ])
-
-    await q.message.reply_text(
-        text,
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
-
-async def read(update, context):
-    q = update.callback_query
-    await q.answer()
-    uid = q.from_user.id
-    mid = q.data.split("_", 1)[1]
-
-    cur.execute("SELECT token FROM users WHERE uid=?", (uid,))
-    token = cur.fetchone()[0]
-
-    msg = requests.get(
-        f"{API}/messages/{mid}",
-        headers=headers(token)
-    ).json()
-
-    await q.message.reply_text(
-        f"<pre>{escape(msg.get('text') or '')[:3500]}</pre>",
-        parse_mode="HTML",
-        reply_markup=main_kb()
-    )
-
-async def newbox(update, context):
-    uid = update.callback_query.from_user.id
-    cur.execute("DELETE FROM users WHERE uid=?", (uid,))
-    conn.commit()
-    await start(update, context)
-
-async def clear(update, context):
-    uid = update.callback_query.from_user.id
-    cur.execute("DELETE FROM users WHERE uid=?", (uid,))
-    conn.commit()
-    await update.callback_query.message.reply_text("🗑 Mailbox deleted")
 
 # ================= AUTO NOTIFY =================
-async def auto_notify(app):
-    while True:
-        cur.execute("SELECT uid, token, last_count FROM users")
-        for uid, token, last in cur.fetchall():
-            msgs = get_msgs(token)
-            if len(msgs) > last:
-                cur.execute(
-                    "UPDATE users SET last_count=? WHERE uid=?",
-                    (len(msgs), uid)
-                )
-                conn.commit()
-                try:
-                    await app.bot.send_message(uid, "📬 New mail received!")
-                except:
-                    pass
-        await asyncio.sleep(30)
+async def notify(context: ContextTypes.DEFAULT_TYPE):
+    uid = context.job.chat_id
+    u = get_user(uid)
+    if not u:
+        return
 
-# ================= MAIN (EVENT LOOP SAFE) =================
+    h = {"Authorization": f"Bearer {u['token']}"}
+    inbox = requests.get(f"{API}/messages", headers=h, timeout=10).json()["hydra:member"]
+
+    for m in inbox:
+        mid = m["id"]
+        cur.execute("SELECT 1 FROM seen WHERE uid=? AND mid=?", (uid, mid))
+        if cur.fetchone():
+            continue
+
+        cur.execute("INSERT INTO seen VALUES (?,?)", (uid, mid))
+        db.commit()
+
+        text = (
+            f"📩 *New Mail*\n"
+            f"👤 {esc(m['from']['address'])}\n"
+            f"📌 {esc(m['subject'])}"
+        )
+
+        await context.bot.send_message(
+            uid,
+            text,
+            parse_mode="Markdown",
+            reply_markup=read_kb(mid)
+        )
+
+# ================= READ FULL =================
+async def read_mail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    mid = q.data.split("_", 1)[1]
+    u = get_user(q.from_user.id)
+    h = {"Authorization": f"Bearer {u['token']}"}
+
+    full = requests.get(f"{API}/messages/{mid}", headers=h, timeout=10).json()
+
+    body = full.get("text") or clean_html(full.get("html", ""))
+    code = otp(body)
+
+    text = (
+        f"👤 *From:* {esc(full['from']['address'])}\n"
+        f"📌 *Subject:* {esc(full['subject'])}\n"
+    )
+
+    if code:
+        text += f"\n🔥 *OTP:* `{code}`\n"
+
+    text += "\n" + esc(body)
+
+    for i in range(0, len(text), 3800):
+        await q.message.reply_text(text[i:i+3800], parse_mode="Markdown")
+
+# ================= BUTTONS =================
+async def refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    u = get_user(q.from_user.id)
+    try:
+        await q.message.edit_text(
+            f"Your temporary email address:\n\n`{u['email']}`",
+            parse_mode="Markdown",
+            reply_markup=home_kb()
+        )
+    except:
+        pass
+
+async def new_mail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    email, password, token = create_mail()
+    cur.execute("REPLACE INTO users VALUES (?,?,?,?)",
+                (q.from_user.id, email, password, token))
+    cur.execute("DELETE FROM seen WHERE uid=?", (q.from_user.id,))
+    db.commit()
+
+    try:
+        await q.message.edit_text(
+            f"Your temporary email address:\n\n`{email}`",
+            parse_mode="Markdown",
+            reply_markup=home_kb()
+        )
+    except:
+        pass
+
+# ================= MAIN =================
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(inbox, pattern="^inbox$"))
-    app.add_handler(CallbackQueryHandler(read, pattern="^read_"))
-    app.add_handler(CallbackQueryHandler(newbox, pattern="^newbox$"))
-    app.add_handler(CallbackQueryHandler(clear, pattern="^clear$"))
+    app.add_handler(CallbackQueryHandler(refresh, pattern="refresh"))
+    app.add_handler(CallbackQueryHandler(new_mail, pattern="new"))
+    app.add_handler(CallbackQueryHandler(read_mail, pattern="^read_"))
 
-    # background task – SAFE (no asyncio.run, no await run_polling)
-    app.post_init = lambda app: asyncio.create_task(auto_notify(app))
-
-    print("🤖 BOT RUNNING STABLE")
+    print("🤖 TempMail FAST Bot Running")
     app.run_polling()
 
 if __name__ == "__main__":

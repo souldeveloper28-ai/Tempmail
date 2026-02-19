@@ -14,18 +14,22 @@ if not BOT_TOKEN:
 db = sqlite3.connect("bot.db", check_same_thread=False)
 cur = db.cursor()
 
-cur.execute("""CREATE TABLE IF NOT EXISTS users(
-uid INTEGER PRIMARY KEY,
-email TEXT,
-password TEXT,
-token TEXT
-)""")
+cur.execute("""
+CREATE TABLE IF NOT EXISTS users(
+    uid INTEGER PRIMARY KEY,
+    email TEXT,
+    password TEXT,
+    token TEXT
+)
+""")
 
-cur.execute("""CREATE TABLE IF NOT EXISTS seen(
-uid INTEGER,
-mid TEXT,
-PRIMARY KEY(uid, mid)
-)""")
+cur.execute("""
+CREATE TABLE IF NOT EXISTS seen(
+    uid INTEGER,
+    mid TEXT,
+    PRIMARY KEY(uid, mid)
+)
+""")
 db.commit()
 
 # ================= UTILS =================
@@ -38,10 +42,6 @@ def clean_html(html):
     html = re.sub(r"<.*?>", "", html)
     return unescape(html)
 
-def otp(text):
-    m = re.findall(r"\b\d{4,8}\b", text or "")
-    return m[0] if m else None
-
 def esc(t):
     return re.sub(r'([_*[\]()~`>#+-=|{}.!])', r'\\\1', t or "")
 
@@ -50,28 +50,37 @@ def get_user(uid):
     r = cur.fetchone()
     return None if not r else {"email": r[0], "password": r[1], "token": r[2]}
 
-# ================= CREATE MAIL =================
-def create_mail():
-    domain = random.choice(
-        requests.get(f"{API}/domains", timeout=10).json()["hydra:member"]
-    )["domain"]
+# ================= CREATE MAIL (SAFE) =================
+def create_mail(retry=5):
+    try:
+        domain = random.choice(
+            requests.get(f"{API}/domains", timeout=10).json()["hydra:member"]
+        )["domain"]
 
-    email = f"{rand()}@{domain}"
-    password = rand(10)
+        email = f"{rand()}@{domain}"
+        password = rand(10)
 
-    requests.post(f"{API}/accounts", json={
-        "address": email,
-        "password": password
-    }, timeout=10)
+        requests.post(f"{API}/accounts", json={
+            "address": email,
+            "password": password
+        }, timeout=10)
 
-    r = requests.post(f"{API}/token", json={
-        "address": email,
-        "password": password
-    }, timeout=10).json()
+        r = requests.post(f"{API}/token", json={
+            "address": email,
+            "password": password
+        }, timeout=10).json()
 
-    return email, password, r["token"]
+        if "token" not in r:
+            raise Exception("Token missing")
 
-# ================= KEYBOARD =================
+        return email, password, r["token"]
+
+    except Exception:
+        if retry > 0:
+            return create_mail(retry - 1)
+        raise RuntimeError("Mail.tm failed")
+
+# ================= KEYBOARDS =================
 def home_kb():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ New / 🗑 Delete", callback_data="new")],
@@ -92,14 +101,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cur.execute("DELETE FROM seen WHERE uid=?", (uid,))
     db.commit()
 
-    for j in context.job_queue.jobs():
-        if j.chat_id == uid:
-            j.schedule_removal()
+    if context.job_queue:
+        for j in context.job_queue.jobs():
+            if j.chat_id == uid:
+                j.schedule_removal()
 
-    context.job_queue.run_repeating(notify, 4, chat_id=uid)
+        context.job_queue.run_repeating(notify, 5, chat_id=uid)
 
     await update.message.reply_text(
-        f"Your temporary email:\n\n`{email}`",
+        f"📧 Your temporary email:\n\n`{email}`",
         parse_mode="Markdown",
         reply_markup=home_kb()
     )
@@ -112,7 +122,7 @@ async def notify(context: ContextTypes.DEFAULT_TYPE):
         return
 
     h = {"Authorization": f"Bearer {u['token']}"}
-    inbox = requests.get(f"{API}/messages", headers=h, timeout=10).json()["hydra:member"]
+    inbox = requests.get(f"{API}/messages", headers=h, timeout=10).json().get("hydra:member", [])
 
     for m in inbox:
         mid = m["id"]
@@ -137,12 +147,13 @@ async def read_mail(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     mid = q.data.split("_", 1)[1]
     u = get_user(q.from_user.id)
+
     h = {"Authorization": f"Bearer {u['token']}"}
-
     full = requests.get(f"{API}/messages/{mid}", headers=h, timeout=10).json()
-    body = full.get("text") or clean_html(full.get("html", ""))
 
+    body = full.get("text") or clean_html(full.get("html", ""))
     text = f"*From:* {esc(full['from']['address'])}\n*Subject:* {esc(full['subject'])}\n\n{esc(body)}"
+
     await q.message.reply_text(text[:4000], parse_mode="Markdown")
 
 # ================= BUTTONS =================
@@ -151,7 +162,7 @@ async def refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     u = get_user(q.from_user.id)
     await q.message.edit_text(
-        f"Your temporary email:\n\n`{u['email']}`",
+        f"📧 Your temporary email:\n\n`{u['email']}`",
         parse_mode="Markdown",
         reply_markup=home_kb()
     )
@@ -159,13 +170,15 @@ async def refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def new_mail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
+
     email, password, token = create_mail()
     cur.execute("REPLACE INTO users VALUES (?,?,?,?)",
                 (q.from_user.id, email, password, token))
     cur.execute("DELETE FROM seen WHERE uid=?", (q.from_user.id,))
     db.commit()
+
     await q.message.edit_text(
-        f"Your temporary email:\n\n`{email}`",
+        f"📧 Your temporary email:\n\n`{email}`",
         parse_mode="Markdown",
         reply_markup=home_kb()
     )

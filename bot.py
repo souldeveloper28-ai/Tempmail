@@ -1,131 +1,114 @@
-import requests, random, string, sqlite3, re, os
-from html import unescape
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+import aiohttp, asyncio, random, string, sqlite3, re, os
+from telegram import *
+from telegram.ext import *
 
-# ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 API = "https://api.mail.tm"
-
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN not set")
 
 # ================= DB =================
 db = sqlite3.connect("bot.db", check_same_thread=False)
 cur = db.cursor()
 
-cur.execute("""
-CREATE TABLE IF NOT EXISTS users(
-    uid INTEGER PRIMARY KEY,
-    email TEXT,
-    password TEXT,
-    token TEXT
-)
-""")
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS seen(
-    uid INTEGER,
-    mid TEXT,
-    PRIMARY KEY(uid, mid)
-)
-""")
+cur.execute("CREATE TABLE IF NOT EXISTS users(uid INTEGER PRIMARY KEY,email TEXT,token TEXT)")
+cur.execute("CREATE TABLE IF NOT EXISTS seen(uid INTEGER,mid TEXT,PRIMARY KEY(uid, mid))")
 db.commit()
 
 # ================= UTILS =================
 def rand(n=8):
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=n))
 
-def clean_html(html):
-    html = re.sub(r"<br\s*/?>", "\n", html)
-    html = re.sub(r"</p>", "\n\n", html)
-    html = re.sub(r"<.*?>", "", html)
-    return unescape(html)
-
 def esc(t):
     return re.sub(r'([_*[\]()~`>#+-=|{}.!])', r'\\\1', t or "")
 
 def get_user(uid):
-    cur.execute("SELECT email,password,token FROM users WHERE uid=?", (uid,))
+    cur.execute("SELECT email,token FROM users WHERE uid=?", (uid,))
     r = cur.fetchone()
-    return None if not r else {"email": r[0], "password": r[1], "token": r[2]}
+    return None if not r else {"email": r[0], "token": r[1]}
 
-# ================= CREATE MAIL (SAFE) =================
-def create_mail(retry=5):
-    try:
-        domain = random.choice(
-            requests.get(f"{API}/domains", timeout=10).json()["hydra:member"]
-        )["domain"]
+# ================= CREATE MAIL =================
+async def create_mail():
+    async with aiohttp.ClientSession() as s:
+        d = await (await s.get(f"{API}/domains")).json()
+        domain = random.choice(d["hydra:member"])["domain"]
 
         email = f"{rand()}@{domain}"
         password = rand(10)
 
-        requests.post(f"{API}/accounts", json={
-            "address": email,
-            "password": password
-        }, timeout=10)
+        await s.post(f"{API}/accounts", json={"address": email, "password": password})
+        t = await (await s.post(f"{API}/token", json={"address": email, "password": password})).json()
 
-        r = requests.post(f"{API}/token", json={
-            "address": email,
-            "password": password
-        }, timeout=10).json()
+        return email, t["token"]
 
-        if "token" not in r:
-            raise Exception("Token missing")
+# ================= UI =================
+def panel(email, count=0):
+    return f"""
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃  ⚡ YASH OMEGA CYBER SYSTEM ⚡
+┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
+┃
+┃ 🟢 STATUS     : ONLINE
+┃ 📡 CONNECTION : STABLE
+┃ 🔐 SECURITY   : MAXIMUM
+┃
+┣━━ 📧 IDENTITY ━━━━━━━━━━━━━━━┫
+┃ ⟿ `{email}`
+┃
+┣━━ 📊 LIVE DATA ━━━━━━━━━━━━━━┫
+┃ ⟿ INBOX   : {count}
+┃ ⟿ SPEED   : ULTRA FAST
+┃ ⟿ MODE    : OMEGA CORE
+┃
+┣━━ 🧠 MODULES ━━━━━━━━━━━━━━━━┫
+┃ ⟿ OTP SCANNER  : ACTIVE
+┃ ⟿ AUTO TRACK   : ENABLED
+┃ ⟿ SMART PARSER : ON
+┃
+┣━━ 🎛 CONTROL ━━━━━━━━━━━━━━━━┫
+┃ ⟿ USE BUTTONS BELOW
+┃
+┣━━ 👑 CREDIT ━━━━━━━━━━━━━━━━┫
+┃ ⟿ Build by Yash ⚡
+┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+"""
 
-        return email, password, r["token"]
-
-    except Exception:
-        if retry > 0:
-            return create_mail(retry - 1)
-        raise RuntimeError("Mail.tm failed")
-
-# ================= KEYBOARDS =================
-def home_kb():
+def kb():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ New / 🗑 Delete", callback_data="new")],
-        [InlineKeyboardButton("🔄 Refresh", callback_data="refresh")]
-    ])
-
-def read_kb(mid):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📖 Read Mail", callback_data=f"read_{mid}")]
+        [InlineKeyboardButton("📡 INBOX", callback_data="refresh"),
+         InlineKeyboardButton("⚡ NEW", callback_data="new")],
+        [InlineKeyboardButton("🧠 SYSTEM", callback_data="system"),
+         InlineKeyboardButton("⚙️ CONTROL", callback_data="menu")],
+        [InlineKeyboardButton("🚀 BOOST", callback_data="boost")]
     ])
 
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
 
-    email, password, token = create_mail()
-    cur.execute("REPLACE INTO users VALUES (?,?,?,?)", (uid, email, password, token))
+    email, token = await create_mail()
+
+    cur.execute("REPLACE INTO users VALUES (?,?,?)", (uid, email, token))
     cur.execute("DELETE FROM seen WHERE uid=?", (uid,))
     db.commit()
 
-    if context.job_queue:
-        for j in context.job_queue.jobs():
-            if j.chat_id == uid:
-                j.schedule_removal()
+    context.job_queue.run_repeating(notify, 2, chat_id=uid)
 
-        context.job_queue.run_repeating(notify, 5, chat_id=uid)
+    await update.message.reply_text(panel(email), parse_mode="Markdown", reply_markup=kb())
 
-    await update.message.reply_text(
-        f"📧 Your temporary email:\n\n`{email}`",
-        parse_mode="Markdown",
-        reply_markup=home_kb()
-    )
-
-# ================= AUTO NOTIFY =================
+# ================= NOTIFY =================
 async def notify(context: ContextTypes.DEFAULT_TYPE):
     uid = context.job.chat_id
     u = get_user(uid)
     if not u:
         return
 
-    h = {"Authorization": f"Bearer {u['token']}"}
-    inbox = requests.get(f"{API}/messages", headers=h, timeout=10).json().get("hydra:member", [])
+    async with aiohttp.ClientSession() as s:
+        h = {"Authorization": f"Bearer {u['token']}"}
+        data = await (await s.get(f"{API}/messages", headers=h)).json()
 
-    for m in inbox:
+    for m in data.get("hydra:member", []):
         mid = m["id"]
+
         cur.execute("SELECT 1 FROM seen WHERE uid=? AND mid=?", (uid, mid))
         if cur.fetchone():
             continue
@@ -133,55 +116,147 @@ async def notify(context: ContextTypes.DEFAULT_TYPE):
         cur.execute("INSERT INTO seen VALUES (?,?)", (uid, mid))
         db.commit()
 
+        subject = m.get("subject", "")
+        otp = re.findall(r"\b\d{4,8}\b", subject)
+
+        msg = f"""
+┏━━ 📩 NEW TRANSMISSION ━━┓
+┃ 👤 `{m['from']['address']}`
+┃ 📌 `{subject}`
+"""
+
+        if otp:
+            msg += f"\n┃ ⚡ OTP: `{otp[0]}`"
+
+        msg += "\n┗━━━━━━━━━━━━━━━━━━━━━━┛"
+
         await context.bot.send_message(
             uid,
-            f"📩 *New Mail*\n👤 {esc(m['from']['address'])}\n📌 {esc(m['subject'])}",
+            msg,
             parse_mode="Markdown",
-            reply_markup=read_kb(mid)
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📂 OPEN", callback_data=f"read_{mid}")]
+            ])
         )
 
-# ================= READ MAIL =================
+# ================= READ =================
 async def read_mail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
 
-    mid = q.data.split("_", 1)[1]
+    mid = q.data.split("_")[1]
     u = get_user(q.from_user.id)
 
-    h = {"Authorization": f"Bearer {u['token']}"}
-    full = requests.get(f"{API}/messages/{mid}", headers=h, timeout=10).json()
+    async with aiohttp.ClientSession() as s:
+        h = {"Authorization": f"Bearer {u['token']}"}
+        full = await (await s.get(f"{API}/messages/{mid}", headers=h)).json()
 
-    body = full.get("text") or clean_html(full.get("html", ""))
-    text = f"*From:* {esc(full['from']['address'])}\n*Subject:* {esc(full['subject'])}\n\n{esc(body)}"
+    body = full.get("text") or re.sub("<.*?>", "", full.get("html", ""))
+    otp = re.findall(r"\b\d{4,8}\b", body)
 
-    await q.message.reply_text(text[:4000], parse_mode="Markdown")
+    msg = f"""
+┏━━ 📂 DATA PACKET ━━┓
+┃ 👤 {esc(full['from']['address'])}
+┃ 📌 {esc(full['subject'])}
+┃
+┃ 📜 {esc(body[:2000])}
+"""
+
+    if otp:
+        msg += f"\n┃ ⚡ OTP: `{otp[0]}`"
+
+    msg += "\n┗━━━━━━━━━━━━━━━━━━━━━━┛"
+
+    await q.message.reply_text(msg, parse_mode="Markdown")
 
 # ================= BUTTONS =================
 async def refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
+
     u = get_user(q.from_user.id)
-    await q.message.edit_text(
-        f"📧 Your temporary email:\n\n`{u['email']}`",
-        parse_mode="Markdown",
-        reply_markup=home_kb()
-    )
+
+    async with aiohttp.ClientSession() as s:
+        h = {"Authorization": f"Bearer {u['token']}"}
+        data = await (await s.get(f"{API}/messages", headers=h)).json()
+
+    count = len(data.get("hydra:member", []))
+
+    await q.message.edit_text(panel(u['email'], count), parse_mode="Markdown", reply_markup=kb())
 
 async def new_mail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
 
-    email, password, token = create_mail()
-    cur.execute("REPLACE INTO users VALUES (?,?,?,?)",
-                (q.from_user.id, email, password, token))
+    email, token = await create_mail()
+
+    cur.execute("REPLACE INTO users VALUES (?,?,?)", (q.from_user.id, email, token))
     cur.execute("DELETE FROM seen WHERE uid=?", (q.from_user.id,))
     db.commit()
 
-    await q.message.edit_text(
-        f"📧 Your temporary email:\n\n`{email}`",
-        parse_mode="Markdown",
-        reply_markup=home_kb()
-    )
+    await q.message.edit_text(panel(email), parse_mode="Markdown", reply_markup=kb())
+
+async def system(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    await q.message.edit_text("""
+┏━━━━━━━━━━━━━━━━━━━━━━┓
+┃   🧠 SYSTEM MATRIX   ┃
+┣━━━━━━━━━━━━━━━━━━━━━━┫
+┃ 🤖 BOT      : ONLINE
+┃ ⚡ SPEED    : OMEGA
+┃ 📡 API      : STABLE
+┃ 🔐 SECURITY : MAX
+┃ 🧠 AI CORE  : ACTIVE
+┃ 📊 TRACKING : LIVE
+┃ 🚀 BOOST    : READY
+┗━━━━━━━━━━━━━━━━━━━━━━┛
+""", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 BACK", callback_data="refresh")]
+    ]))
+
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    await q.message.edit_text("""
+┏━━━━━━━━━━━━━━━━━━━━━━┓
+┃   ⚙️ CONTROL HUB     ┃
+┣━━━━━━━━━━━━━━━━━━━━━━┫
+┃ 📡 FETCH INBOX
+┃ ⚡ GENERATE MAIL
+┃ 🧠 SCAN OTP
+┃ 📊 SYSTEM STATUS
+┃ 🚀 BOOST MODE
+┗━━━━━━━━━━━━━━━━━━━━━━┛
+""", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("📡 Inbox", callback_data="refresh")],
+        [InlineKeyboardButton("⚡ New Mail", callback_data="new")],
+        [InlineKeyboardButton("🧠 System", callback_data="system")],
+        [InlineKeyboardButton("🔙 Back", callback_data="refresh")]
+    ]))
+
+async def boost(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    steps = [
+        "⚡ Initializing...",
+        "📡 Connecting...",
+        "🧠 Loading AI...",
+        "🚀 Boosting...",
+        "✅ DONE"
+    ]
+
+    msg = await q.message.edit_text("⚡ Starting...")
+
+    for s in steps:
+        await asyncio.sleep(0.6)
+        await msg.edit_text(f"```{s}```", parse_mode="Markdown")
+
+    u = get_user(q.from_user.id)
+    await msg.edit_text(panel(u['email']), parse_mode="Markdown", reply_markup=kb())
 
 # ================= MAIN =================
 def main():
@@ -191,8 +266,11 @@ def main():
     app.add_handler(CallbackQueryHandler(refresh, pattern="refresh"))
     app.add_handler(CallbackQueryHandler(new_mail, pattern="new"))
     app.add_handler(CallbackQueryHandler(read_mail, pattern="^read_"))
+    app.add_handler(CallbackQueryHandler(system, pattern="system"))
+    app.add_handler(CallbackQueryHandler(menu, pattern="menu"))
+    app.add_handler(CallbackQueryHandler(boost, pattern="boost"))
 
-    print("🤖 BOT RUNNING STABLE")
+    print("🔥 YASH OMEGA BOT RUNNING")
     app.run_polling()
 
 if __name__ == "__main__":

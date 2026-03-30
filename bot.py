@@ -1,4 +1,4 @@
-import aiohttp, asyncio, random, string, sqlite3, re, os, time
+import aiohttp, asyncio, random, string, sqlite3, re, os, time, atexit
 from telegram import *
 from telegram.ext import *
 
@@ -18,6 +18,20 @@ cur.execute("CREATE TABLE IF NOT EXISTS logs(uid INTEGER,action TEXT)")
 db.commit()
 
 session = None
+
+# ================= SAFE CLOSE =================
+@atexit.register
+def close_session():
+    global session
+    if session:
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(session.close())
+            else:
+                loop.run_until_complete(session.close())
+        except:
+            pass
 
 # ================= UTILS =================
 def rand(n=8):
@@ -317,7 +331,7 @@ async def logs(update, context):
     await q.message.edit_text(txt)
 
 # ================= MAIN =================
-async def main():
+def main():
     global session
     session = aiohttp.ClientSession()
 
@@ -344,7 +358,7 @@ async def main():
     app.job_queue.run_repeating(global_notify, 4)
 
     print("🔥 FULL POWER SYSTEM RUNNING")
-    await app.run_polling()
+    app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

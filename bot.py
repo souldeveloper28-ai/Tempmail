@@ -1,4 +1,4 @@
-import aiohttp, asyncio, random, string, sqlite3, re, os, time, atexit
+import aiohttp, asyncio, random, string, sqlite3, re, os, time
 from telegram import *
 from telegram.ext import *
 
@@ -19,19 +19,15 @@ db.commit()
 
 session = None
 
-# ================= SAFE CLOSE =================
-@atexit.register
-def close_session():
+# ================= INIT / CLOSE SESSION =================
+async def init_session(app: Application):
+    global session
+    session = aiohttp.ClientSession()
+
+async def close_session(app: Application):
     global session
     if session:
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(session.close())
-            else:
-                loop.run_until_complete(session.close())
-        except:
-            pass
+        await session.close()
 
 # ================= UTILS =================
 def rand(n=8):
@@ -132,13 +128,9 @@ async def global_notify(context):
             cur.execute("INSERT INTO seen VALUES (?,?)",(uid,mid))
             db.commit()
 
-            otp, cat, summary = ai(m.get("subject",""))
+            otp, cat, _ = ai(m.get("subject",""))
 
-            msg = f"""
-📩 NEW MAIL
-📌 {m['subject']}
-🧠 Type: {cat}
-"""
+            msg = f"📩 NEW MAIL\n📌 {m['subject']}\n🧠 {cat}"
             if otp:
                 msg += f"\n🔐 OTP: {otp}"
 
@@ -258,6 +250,7 @@ async def handle_msg(update, context):
         context.user_data["ban"] = False
         await update.message.reply_text("🚫 Banned")
 
+# ================= ADMIN BUTTONS =================
 async def stats(update, context):
     if not is_admin(context): return
     q = update.callback_query
@@ -332,10 +325,10 @@ async def logs(update, context):
 
 # ================= MAIN =================
 def main():
-    global session
-    session = aiohttp.ClientSession()
-
     app = Application.builder().token(BOT_TOKEN).build()
+
+    app.post_init = init_session
+    app.post_shutdown = close_session
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(inbox, pattern="inbox"))
@@ -357,7 +350,7 @@ def main():
 
     app.job_queue.run_repeating(global_notify, 4)
 
-    print("🔥 FULL POWER SYSTEM RUNNING")
+    print("🔥 FINAL SYSTEM RUNNING")
     app.run_polling()
 
 if __name__ == "__main__":

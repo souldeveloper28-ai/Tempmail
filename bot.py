@@ -1,3 +1,4 @@
+
 import aiohttp, asyncio, sqlite3, re, os
 from telegram import *
 from telegram.ext import *
@@ -8,6 +9,7 @@ API = "https://tempmail-api-xi.vercel.app/api/mail"
 db = sqlite3.connect("bot.db", check_same_thread=False)
 cur = db.cursor()
 
+# store all emails permanently
 cur.execute("CREATE TABLE IF NOT EXISTS users(uid INTEGER, email TEXT)")
 cur.execute("CREATE TABLE IF NOT EXISTS active(uid INTEGER PRIMARY KEY, email TEXT)")
 cur.execute("CREATE TABLE IF NOT EXISTS seen(uid INTEGER, mid TEXT, PRIMARY KEY(uid, mid))")
@@ -48,16 +50,22 @@ async def create_mail():
         d = await r.json()
     return d["email"], d["login"], d["domain"]
 
-# ================= PANEL =================
+# ================= UI =================
 def panel(email):
-    return f"📧 `{email}`\n\n⚡ Multi TempMail Active\n🔐 Auto OTP ON"
+    return f"""
+╔═══ 📧 TEMP MAIL ═══╗
+📮 `{email}`
 
-def kb():
+♻️ Reusable Email
+🔐 OTP Scanner ON
+╚═══════════════════╝
+"""
+
+def main_kb():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📩 Inbox", callback_data="inbox"),
          InlineKeyboardButton("⚡ New", callback_data="new")],
         [InlineKeyboardButton("📂 My Emails", callback_data="list")],
-        [InlineKeyboardButton("🗑 Delete", callback_data="delete")],
         [InlineKeyboardButton("🔄 Refresh", callback_data="refresh")]
     ])
 
@@ -65,16 +73,23 @@ def kb():
 async def start(update, context):
     uid = update.effective_user.id
 
-    email, login, domain = await create_mail()
-    data = f"{login}|{domain}"
+    # if user already has emails → reuse last
+    data = get_active(uid)
 
-    cur.execute("INSERT INTO users VALUES (?,?)",(uid,data))
-    cur.execute("REPLACE INTO active VALUES (?,?)",(uid,data))
-    db.commit()
+    if data:
+        login, domain = parse_email(data)
+        email = f"{login}@{domain}"
+    else:
+        email, login, domain = await create_mail()
+        data = f"{login}|{domain}"
+
+        cur.execute("INSERT INTO users VALUES (?,?)",(uid,data))
+        cur.execute("REPLACE INTO active VALUES (?,?)",(uid,data))
+        db.commit()
 
     await update.message.reply_text(panel(email),
         parse_mode="Markdown",
-        reply_markup=kb()
+        reply_markup=main_kb()
     )
 
 # ================= GLOBAL OTP =================
@@ -85,11 +100,8 @@ async def global_notify(context):
     for uid, data in users:
         login, domain = parse_email(data)
 
-        try:
-            async with session.get(f"{API}?type=inbox&login={login}&domain={domain}") as r:
-                d = await r.json()
-        except:
-            continue
+        async with session.get(f"{API}?type=inbox&login={login}&domain={domain}") as r:
+            d = await r.json()
 
         for m in d.get("messages", []):
             mid = str(m["id"])
@@ -101,20 +113,18 @@ async def global_notify(context):
             cur.execute("INSERT INTO seen VALUES (?,?)",(uid,mid))
             db.commit()
 
-            subject = m.get("subject","No subject")
-
             async with session.get(f"{API}?type=otp&login={login}&domain={domain}&id={mid}") as r:
                 otp_data = await r.json()
 
             otp = otp_data.get("otp")
 
-            msg = f"📩 {subject}"
+            msg = f"📩 {m.get('subject','Mail')}"
             if otp:
                 msg += f"\n🔐 OTP: `{otp}`"
 
             await context.bot.send_message(uid, msg, parse_mode="Markdown")
 
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.5)
 
 # ================= INBOX =================
 async def inbox(update, context):
@@ -183,7 +193,7 @@ async def list_emails(update, context):
 
     buttons.append([InlineKeyboardButton("🔙 Back", callback_data="refresh")])
 
-    await q.message.edit_text("📂 Your Emails",
+    await q.message.edit_text("📂 Saved Emails",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
@@ -202,24 +212,7 @@ async def set_email(update, context):
 
     await q.message.edit_text(panel(email),
         parse_mode="Markdown",
-        reply_markup=kb()
-    )
-
-# ================= DELETE =================
-async def delete_email(update, context):
-    q = update.callback_query
-    await q.answer()
-
-    data = get_active(q.from_user.id)
-
-    cur.execute("DELETE FROM users WHERE uid=? AND email=?", (q.from_user.id,data))
-    cur.execute("DELETE FROM active WHERE uid=?", (q.from_user.id,))
-    db.commit()
-
-    await q.message.edit_text("🗑 Email deleted. Create new one.",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("⚡ New", callback_data="new")]
-        ])
+        reply_markup=main_kb()
     )
 
 # ================= NEW =================
@@ -236,7 +229,7 @@ async def new(update, context):
 
     await q.message.edit_text(panel(email),
         parse_mode="Markdown",
-        reply_markup=kb()
+        reply_markup=main_kb()
     )
 
 # ================= REFRESH =================
@@ -250,7 +243,7 @@ async def refresh(update, context):
 
     await q.message.edit_text(panel(email),
         parse_mode="Markdown",
-        reply_markup=kb()
+        reply_markup=main_kb()
     )
 
 # ================= MAIN =================
@@ -267,11 +260,10 @@ def main():
     app.add_handler(CallbackQueryHandler(new, pattern="new"))
     app.add_handler(CallbackQueryHandler(list_emails, pattern="list"))
     app.add_handler(CallbackQueryHandler(set_email, pattern="set_"))
-    app.add_handler(CallbackQueryHandler(delete_email, pattern="delete"))
 
     app.job_queue.run_repeating(global_notify, 3)
 
-    print("🔥 FINAL GOD MULTI TEMPMAIL BOT RUNNING")
+    print("🔥 REUSABLE TEMPMAIL BOT RUNNING")
     app.run_polling()
 
 if __name__ == "__main__":

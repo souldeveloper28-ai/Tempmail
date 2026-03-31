@@ -3,12 +3,11 @@ from telegram import *
 from telegram.ext import *
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-API = "https://tempmail-api-xi.vercel.app/api/mail"
 
 db = sqlite3.connect("bot.db", check_same_thread=False)
 cur = db.cursor()
 
-cur.execute("CREATE TABLE IF NOT EXISTS users(uid INTEGER PRIMARY KEY,email TEXT,token TEXT,login TEXT,domain TEXT,provider TEXT)")
+cur.execute("CREATE TABLE IF NOT EXISTS users(uid INTEGER PRIMARY KEY,email TEXT,token TEXT)")
 cur.execute("CREATE TABLE IF NOT EXISTS seen(uid INTEGER,mid TEXT,PRIMARY KEY(uid, mid))")
 db.commit()
 
@@ -29,22 +28,34 @@ def find_otp(text):
     return x[0] if x else None
 
 def get_user(uid):
-    cur.execute("SELECT * FROM users WHERE uid=?", (uid,))
+    cur.execute("SELECT email,token FROM users WHERE uid=?", (uid,))
     return cur.fetchone()
 
 # ================= CREATE =================
 async def create_mail():
-    async with session.get(f"{API}?type=new") as r:
+    async with session.get("https://api.mail.tm/domains") as r:
         d = await r.json()
-    return d
+
+    domain = d["hydra:member"][0]["domain"]
+    login = "user" + str(int(asyncio.get_event_loop().time()*1000))[-6:]
+    password = "pass123456"
+
+    data = {"address": f"{login}@{domain}", "password": password}
+
+    await session.post("https://api.mail.tm/accounts", json=data)
+
+    async with session.post("https://api.mail.tm/token", json=data) as r:
+        tok = await r.json()
+
+    return data["address"], tok["token"]
 
 # ================= UI =================
-def panel(email, provider):
+def panel(email):
     return f"""
 📧 `{email}`
 
-⚡ Provider: {provider}
-🔐 OTP Scanner: ON
+⚡ Temp Mail Active
+🔐 OTP Scanner ON
 """
 
 def kb():
@@ -58,46 +69,32 @@ def kb():
 async def start(update, context):
     uid = update.effective_user.id
 
-    await update.message.reply_text("⚡ Creating email...")
+    email, token = await create_mail()
 
-    d = await create_mail()
-
-    email = d["email"]
-    provider = d.get("provider")
-
-    token = d.get("token")
-    login = d.get("login")
-    domain = d.get("domain")
-
-    cur.execute("REPLACE INTO users VALUES (?,?,?,?,?,?)",
-                (uid,email,token,login,domain,provider))
+    cur.execute("REPLACE INTO users VALUES (?,?,?)",(uid,email,token))
     cur.execute("DELETE FROM seen WHERE uid=?", (uid,))
     db.commit()
 
-    await update.message.reply_text(panel(email, provider),
+    await update.message.reply_text(panel(email),
         parse_mode="Markdown",
         reply_markup=kb()
     )
 
-# ================= GLOBAL OTP =================
+# ================= GLOBAL AUTO OTP =================
 async def global_notify(context):
-    cur.execute("SELECT uid,email,token,login,domain,provider FROM users")
+    cur.execute("SELECT uid,email,token FROM users")
     users = cur.fetchall()
 
-    for uid,email,token,login,domain,provider in users:
-
+    for uid,email,token in users:
         try:
-            if provider == "mailtm":
-                url = f"{API}?type=inbox&token={token}"
-            else:
-                url = f"{API}?type=inbox&login={login}&domain={domain}"
+            headers = {"Authorization": f"Bearer {token}"}
 
-            async with session.get(url) as r:
+            async with session.get("https://api.mail.tm/messages", headers=headers) as r:
                 d = await r.json()
         except:
             continue
 
-        for m in d.get("messages", []):
+        for m in d.get("hydra:member", []):
             mid = str(m["id"])
 
             cur.execute("SELECT 1 FROM seen WHERE uid=? AND mid=?", (uid,mid))
@@ -107,16 +104,11 @@ async def global_notify(context):
             cur.execute("INSERT INTO seen VALUES (?,?)",(uid,mid))
             db.commit()
 
-            # OTP fetch
-            if provider == "mailtm":
-                url = f"{API}?type=otp&token={token}&id={mid}"
-            else:
-                url = f"{API}?type=otp&login={login}&domain={domain}&id={mid}"
+            async with session.get(f"https://api.mail.tm/messages/{mid}", headers=headers) as r:
+                mail = await r.json()
 
-            async with session.get(url) as r:
-                otp_data = await r.json()
-
-            otp = otp_data.get("otp")
+            body = (mail.get("text","") + mail.get("html",""))
+            otp = find_otp(body)
 
             msg = f"📩 {m.get('subject','Mail')}"
             if otp:
@@ -132,20 +124,15 @@ async def inbox(update, context):
     await q.answer()
 
     uid = q.from_user.id
-    user = get_user(uid)
+    email, token = get_user(uid)
 
-    _,email,token,login,domain,provider = user
+    headers = {"Authorization": f"Bearer {token}"}
 
-    if provider == "mailtm":
-        url = f"{API}?type=inbox&token={token}"
-    else:
-        url = f"{API}?type=inbox&login={login}&domain={domain}"
-
-    async with session.get(url) as r:
+    async with session.get("https://api.mail.tm/messages", headers=headers) as r:
         d = await r.json()
 
     buttons = []
-    for m in d.get("messages", [])[:5]:
+    for m in d.get("hydra:member", [])[:5]:
         buttons.append([
             InlineKeyboardButton(m.get("subject","No subject")[:30],
                                  callback_data=f"read_{m['id']}")
@@ -163,23 +150,16 @@ async def read_mail(update, context):
     await q.answer()
 
     uid = q.from_user.id
-    user = get_user(uid)
-
-    _,email,token,login,domain,provider = user
+    email, token = get_user(uid)
 
     mid = q.data.split("_")[1]
 
-    if provider == "mailtm":
-        url = f"{API}?type=read&token={token}&id={mid}"
-    else:
-        url = f"{API}?type=read&login={login}&domain={domain}&id={mid}"
+    headers = {"Authorization": f"Bearer {token}"}
 
-    async with session.get(url) as r:
-        d = await r.json()
+    async with session.get(f"https://api.mail.tm/messages/{mid}", headers=headers) as r:
+        m = await r.json()
 
-    m = d["data"]
-    body = m.get("body","") + m.get("text","")
-
+    body = (m.get("text","") + m.get("html",""))
     otp = find_otp(body)
 
     msg = f"📂 {m.get('subject')}\n👤 {m.get('from')}\n"
@@ -198,10 +178,9 @@ async def refresh(update, context):
     q = update.callback_query
     await q.answer()
 
-    user = get_user(q.from_user.id)
-    _,email,_,_,_,provider = user
+    email, _ = get_user(q.from_user.id)
 
-    await q.message.edit_text(panel(email, provider),
+    await q.message.edit_text(panel(email),
         parse_mode="Markdown",
         reply_markup=kb()
     )
@@ -211,13 +190,12 @@ async def new(update, context):
     q = update.callback_query
     await q.answer()
 
-    d = await create_mail()
+    email, token = await create_mail()
 
-    cur.execute("REPLACE INTO users VALUES (?,?,?,?,?,?)",
-                (q.from_user.id,d["email"],d.get("token"),d.get("login"),d.get("domain"),d.get("provider")))
+    cur.execute("REPLACE INTO users VALUES (?,?,?)",(q.from_user.id,email,token))
     db.commit()
 
-    await q.message.edit_text(panel(d["email"], d.get("provider")),
+    await q.message.edit_text(panel(email),
         parse_mode="Markdown",
         reply_markup=kb()
     )
@@ -237,7 +215,7 @@ def main():
 
     app.job_queue.run_repeating(global_notify, 3)
 
-    print("🔥 FINAL PRO BOT RUNNING")
+    print("🔥 MAIL.TM UI BOT RUNNING")
     app.run_polling()
 
 if __name__ == "__main__":

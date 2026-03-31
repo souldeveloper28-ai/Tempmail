@@ -1,4 +1,4 @@
-name: ⚡ TempMail ULTRA CORE x40
+name: ⚡ TempMail GOD MODE SINGLE
 
 on:
   workflow_dispatch:
@@ -10,17 +10,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 350
 
-    strategy:
-      fail-fast: false
-      max-parallel: 40
-      matrix:
-        engine: [
-          1,2,3,4,5,6,7,8,9,10,
-          11,12,13,14,15,16,17,18,19,20,
-          21,22,23,24,25,26,27,28,29,30,
-          31,32,33,34,35,36,37,38,39,40
-        ]
-
     steps:
     - name: ⚡ Checkout
       uses: actions/checkout@v4
@@ -31,26 +20,27 @@ jobs:
         python-version: '3.11'
         cache: 'pip'
 
-    - name: 🚀 Install Fast
+    - name: 🚀 Install Ultra Fast
       run: |
         python -m pip install --upgrade pip wheel setuptools
-        pip install -r requirements.txt --no-cache-dir --prefer-binary
+        pip install -r requirements.txt --prefer-binary
 
-    - name: ⚡ SYSTEM BOOST
+    - name: ⚡ EXTREME SYSTEM BOOST
       run: |
-        echo "🔥 ENGINE ${{ matrix.engine }} BOOST"
+        echo "🔥 GOD MODE ENABLED"
         export PYTHONUNBUFFERED=1
         export PYTHONOPTIMIZE=2
         export PYTHONDONTWRITEBYTECODE=1
         export MALLOC_ARENA_MAX=1
         ulimit -n 1048576 || true
 
-    - name: 💀 RUN ENGINE
+    - name: 💀 RUN GOD BOT
       env:
-        BOT_TOKEN: ${{ secrets.BOT_TOKEN }}   # 🔥 FIX ADDED
+        BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
       run: |
-        echo "⚡ START ENGINE ${{ matrix.engine }}"
+        echo "⚡ START GOD ENGINE"
+
         while true
         do
-          timeout 300 python3 bot.py || echo "💥 Restart Engine ${{ matrix.engine }}"
+          timeout 340 python3 bot.py || echo "💥 Restart GOD"
         done

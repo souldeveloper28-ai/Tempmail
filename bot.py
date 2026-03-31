@@ -198,26 +198,35 @@ async def read_mail(update, context):
 
     await q.message.edit_text(msg, parse_mode="Markdown")
 
+# ================= REFRESH =================
+async def refresh(update, context):
+    q = update.callback_query
+    await q.answer()
+
+    u = get_user(q.from_user.id)
+
+    async with session.get(f"{API}/messages",
+        headers={"Authorization": f"Bearer {u['token']}"}) as r:
+        data = await r.json()
+
+    count = len(data.get("hydra:member", []))
+
+    await q.message.edit_text(panel(u['email'], count),
+        parse_mode="Markdown", reply_markup=kb())
+
+# ================= BOOST =================
+async def boost(update, context):
+    q = update.callback_query
+    await q.answer()
+
+    msg = await q.message.edit_text("⚡ BOOSTING...")
+    for s in ["INIT","AI","SYNC","DONE"]:
+        await asyncio.sleep(0.3)
+        await msg.edit_text(s)
+
+    await refresh(update, context)
+
 # ================= ADMIN =================
-def admin_kb():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 Stats", callback_data="stats"),
-         InlineKeyboardButton("👥 Users", callback_data="users")],
-        [InlineKeyboardButton("📢 Broadcast", callback_data="broadcast"),
-         InlineKeyboardButton("⚡ Force", callback_data="force")],
-        [InlineKeyboardButton("🚫 Ban", callback_data="ban"),
-         InlineKeyboardButton("🗑 Reset", callback_data="reset")],
-        [InlineKeyboardButton("🚪 Logout", callback_data="logout")]
-    ])
-
-def is_admin(context):
-    if not context.user_data.get("is_admin"):
-        return False
-    if time.time() - context.user_data.get("admin_time",0) > ADMIN_TIMEOUT:
-        context.user_data["is_admin"] = False
-        return False
-    return True
-
 async def admin_login(update, context):
     q = update.callback_query
     await q.answer()
@@ -235,31 +244,9 @@ async def handle_msg(update, context):
             context.user_data["is_admin"] = True
             context.user_data["admin_time"] = time.time()
             context.user_data["admin_login"] = False
-            await update.message.reply_text("👑 ADMIN MODE", reply_markup=admin_kb())
+            await update.message.reply_text("👑 ADMIN MODE")
         else:
             await update.message.reply_text("❌ Wrong")
-        return
-
-    if context.user_data.get("broadcast") and is_admin(context):
-        cur.execute("SELECT uid FROM users")
-        for u in cur.fetchall():
-            try:
-                await context.bot.send_message(u[0], text)
-            except: pass
-        context.user_data["broadcast"] = False
-
-    if context.user_data.get("force") and is_admin(context):
-        cur.execute("SELECT uid FROM users")
-        for u in cur.fetchall():
-            try:
-                await context.bot.send_message(u[0], f"⚠️ {text}")
-            except: pass
-        context.user_data["force"] = False
-
-    if context.user_data.get("ban") and is_admin(context):
-        cur.execute("DELETE FROM users WHERE uid=?", (int(text),))
-        db.commit()
-        context.user_data["ban"] = False
 
 # ================= MAIN =================
 def main():
@@ -272,7 +259,6 @@ def main():
     app.add_handler(CallbackQueryHandler(inbox, pattern="inbox"))
     app.add_handler(CallbackQueryHandler(read_mail, pattern="read_"))
     app.add_handler(CallbackQueryHandler(refresh, pattern="refresh"))
-    app.add_handler(CallbackQueryHandler(new, pattern="new"))
     app.add_handler(CallbackQueryHandler(boost, pattern="boost"))
     app.add_handler(CallbackQueryHandler(admin_login, pattern="admin_login"))
 
@@ -280,7 +266,7 @@ def main():
 
     app.job_queue.run_repeating(global_notify, 5)
 
-    print("🔥 NEON GOD SYSTEM RUNNING")
+    print("🔥 FINAL SYSTEM RUNNING")
     app.run_polling()
 
 if __name__ == "__main__":

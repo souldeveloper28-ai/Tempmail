@@ -1,25 +1,52 @@
-name: TempMail Bot 24x7
+name: ⚡ TempMail ULTRA CORE FINAL
 
 on:
-  schedule:
-    - cron: "*/15 * * * *"
   workflow_dispatch:
+  schedule:
+    - cron: "*/10 * * * *"
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 355
+    timeout-minutes: 350
+
+    strategy:
+      fail-fast: false
+      max-parallel: 40
+      matrix:
+        engine: [1,2,3,4,5,6,7,8,9,10,
+                 11,12,13,14,15,16,17,18,19,20,
+                 21,22,23,24,25,26,27,28,29,30,
+                 31,32,33,34,35,36,37,38,39,40]
 
     steps:
-      - uses: actions/checkout@v4
+    - name: ⚡ Checkout
+      uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+    - name: 🧠 Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
 
-      - run: pip install -r requirements.txt
+    - name: 🚀 Install Requirements
+      run: |
+        python -m pip install --upgrade pip wheel setuptools
+        pip install -r requirements.txt --prefer-binary
 
-      - run: python3 bot.py
-        env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          ADMIN_ID: ${{ secrets.ADMIN_ID }}
+    - name: ⚡ SYSTEM BOOST
+      run: |
+        echo "🔥 ENGINE ${{ matrix.engine }}"
+        export PYTHONUNBUFFERED=1
+        export PYTHONOPTIMIZE=2
+        export PYTHONDONTWRITEBYTECODE=1
+        export MALLOC_ARENA_MAX=1
+        ulimit -n 1048576 || true
+
+    - name: 💀 RUN BOT
+      run: |
+        echo "⚡ START ENGINE ${{ matrix.engine }}"
+        while true
+        do
+          timeout 300 python3 bot.py || echo "💥 Restart Engine ${{ matrix.engine }}"
+        done

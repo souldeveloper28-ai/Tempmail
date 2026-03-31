@@ -1,15 +1,15 @@
-import aiohttp, asyncio, random, string, sqlite3, re, os
+import aiohttp, asyncio, sqlite3, re, os
 from telegram import *
 from telegram.ext import *
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-API = "https://api.mail.tm"
 
-# ================= DB =================
+API = "https://tempmail-api-xi.vercel.app/api/mail"
+
 db = sqlite3.connect("bot.db", check_same_thread=False)
 cur = db.cursor()
 
-cur.execute("CREATE TABLE IF NOT EXISTS users(uid INTEGER PRIMARY KEY,email TEXT,token TEXT)")
+cur.execute("CREATE TABLE IF NOT EXISTS users(uid INTEGER PRIMARY KEY,email TEXT)")
 cur.execute("CREATE TABLE IF NOT EXISTS seen(uid INTEGER,mid TEXT,PRIMARY KEY(uid, mid))")
 db.commit()
 
@@ -25,13 +25,10 @@ async def close_session(app):
         await session.close()
 
 # ================= UTILS =================
-def rand(n=8):
-    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=n))
-
 def get_user(uid):
-    cur.execute("SELECT email,token FROM users WHERE uid=?", (uid,))
+    cur.execute("SELECT email FROM users WHERE uid=?", (uid,))
     r = cur.fetchone()
-    return None if not r else {"email": r[0], "token": r[1]}
+    return None if not r else r[0]
 
 def find_otp(text):
     x = re.findall(r"\b\d{4,8}\b", text)
@@ -39,34 +36,23 @@ def find_otp(text):
 
 # ================= CREATE MAIL =================
 async def create_mail():
-    async with session.get(f"{API}/domains") as r:
-        d = await r.json()
+    async with session.get(API) as r:
+        data = await r.json()
+    return data["email"]
 
-    domain = random.choice(d["hydra:member"])["domain"]
-    email = f"{rand()}@{domain}"
-    password = rand(10)
-
-    await session.post(f"{API}/accounts", json={"address": email,"password": password})
-
-    async with session.post(f"{API}/token", json={"address": email,"password": password}) as r:
-        t = await r.json()
-
-    return email, t["token"]
-
-# ================= UI =================
-def panel(email, count=0):
+# ================= PANEL =================
+def panel(email):
     return f"""
 📧 `{email}`
 
-📥 Inbox: {count}
 ⚡ Temp Mail Active
 🔐 OTP Scanner ON
 """
 
-def main_kb():
+def kb():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📩 Inbox", callback_data="inbox"),
-         InlineKeyboardButton("⚡ New Mail", callback_data="new")],
+         InlineKeyboardButton("⚡ New", callback_data="new")],
         [InlineKeyboardButton("🔄 Refresh", callback_data="refresh")]
     ])
 
@@ -74,140 +60,143 @@ def main_kb():
 async def start(update, context):
     uid = update.effective_user.id
 
-    email, token = await create_mail()
-    cur.execute("REPLACE INTO users VALUES (?,?,?)",(uid,email,token))
-    cur.execute("DELETE FROM seen WHERE uid=?",(uid,))
+    email = await create_mail()
+
+    cur.execute("REPLACE INTO users VALUES (?,?)",(uid,email))
+    cur.execute("DELETE FROM seen WHERE uid=?", (uid,))
     db.commit()
 
-    await update.message.reply_text(
-        panel(email),
+    await update.message.reply_text(panel(email),
         parse_mode="Markdown",
-        reply_markup=main_kb()
+        reply_markup=kb()
     )
 
-# ================= GLOBAL MAIL =================
+# ================= GLOBAL =================
 async def global_notify(context):
-    cur.execute("SELECT uid,token FROM users")
+    cur.execute("SELECT uid,email FROM users")
     users = cur.fetchall()
 
-    for uid, token in users:
+    for uid, email in users:
         try:
-            async with session.get(f"{API}/messages",
-                headers={"Authorization": f"Bearer {token}"}) as r:
+            async with session.get(f"{API}?email={email}") as r:
                 data = await r.json()
         except:
             continue
 
-        for m in data.get("hydra:member", []):
+        for m in data.get("messages", []):
             mid = m["id"]
 
             cur.execute("SELECT 1 FROM seen WHERE uid=? AND mid=?", (uid,mid))
-            if cur.fetchone(): continue
+            if cur.fetchone():
+                continue
 
             cur.execute("INSERT INTO seen VALUES (?,?)",(uid,mid))
             db.commit()
 
-            async with session.get(f"{API}/messages/{mid}",
-                headers={"Authorization": f"Bearer {token}"}) as r:
-                full = await r.json()
-
-            body = full.get("text") or full.get("html","")
+            body = m.get("body","")
             otp = find_otp(body)
 
-            msg = f"📩 {full['subject']}"
+            msg = f"📩 {m.get('subject','No subject')}"
             if otp:
                 msg += f"\n🔐 OTP: `{otp}`"
 
-            kb = InlineKeyboardMarkup([
+            keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("📖 Open Mail", callback_data=f"read_{mid}")]
             ])
 
-            await context.bot.send_message(uid, msg, parse_mode="Markdown", reply_markup=kb)
+            await context.bot.send_message(uid, msg,
+                parse_mode="Markdown",
+                reply_markup=keyboard
+            )
 
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.3)
 
 # ================= INBOX =================
 async def inbox(update, context):
     q = update.callback_query
     await q.answer()
 
-    u = get_user(q.from_user.id)
+    email = get_user(q.from_user.id)
 
-    async with session.get(f"{API}/messages",
-        headers={"Authorization": f"Bearer {u['token']}"}) as r:
+    async with session.get(f"{API}?email={email}") as r:
         data = await r.json()
 
     buttons = []
-    for m in data.get("hydra:member", [])[:5]:
+    for m in data.get("messages", [])[:5]:
         buttons.append([
-            InlineKeyboardButton(m['subject'][:30], callback_data=f"read_{m['id']}")
+            InlineKeyboardButton(m.get("subject","No subject")[:30],
+                                 callback_data=f"read_{m['id']}")
         ])
 
     buttons.append([InlineKeyboardButton("🔙 Back", callback_data="refresh")])
 
-    await q.message.edit_text(
-        "📩 Inbox",
+    await q.message.edit_text("📩 Inbox",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
-# ================= READ MAIL =================
+# ================= READ =================
 async def read_mail(update, context):
     q = update.callback_query
     await q.answer()
 
+    email = get_user(q.from_user.id)
     mid = q.data.split("_")[1]
-    u = get_user(q.from_user.id)
 
-    async with session.get(f"{API}/messages/{mid}",
-        headers={"Authorization": f"Bearer {u['token']}"}) as r:
-        full = await r.json()
+    async with session.get(f"{API}?email={email}") as r:
+        data = await r.json()
 
-    body = full.get("text") or full.get("html","")
-    otp = find_otp(body)
+    for m in data.get("messages", []):
+        if m["id"] == mid:
+            body = m.get("body","")
+            otp = find_otp(body)
 
-    msg = f"""
-📂 {full['subject']}
-👤 {full['from']['address']}
+            msg = f"""
+📂 {m.get('subject')}
+👤 {m.get('from')}
 """
 
-    if otp:
-        msg += f"\n🔐 OTP: `{otp}`"
+            if otp:
+                msg += f"\n🔐 OTP: `{otp}`"
 
-    msg += f"\n\n{body[:3000]}"
+            msg += f"\n\n{body[:3000]}"
 
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 Back to Inbox", callback_data="inbox")]
+            break
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 Back", callback_data="inbox")]
     ])
 
-    await q.message.edit_text(msg, parse_mode="Markdown", reply_markup=kb)
+    await q.message.edit_text(msg,
+        parse_mode="Markdown",
+        reply_markup=keyboard
+    )
 
 # ================= REFRESH =================
 async def refresh(update, context):
     q = update.callback_query
     await q.answer()
 
-    u = get_user(q.from_user.id)
+    email = get_user(q.from_user.id)
 
-    async with session.get(f"{API}/messages",
-        headers={"Authorization": f"Bearer {u['token']}"}) as r:
-        data = await r.json()
-
-    await q.message.edit_text(
-        panel(u['email'], len(data.get("hydra:member", []))),
+    await q.message.edit_text(panel(email),
         parse_mode="Markdown",
-        reply_markup=main_kb()
+        reply_markup=kb()
     )
 
-# ================= NEW MAIL =================
+# ================= NEW =================
 async def new(update, context):
     q = update.callback_query
     await q.answer()
 
-    email, token = await create_mail()
-    cur.execute("REPLACE INTO users VALUES (?,?,?)",(q.from_user.id,email,token))
+    email = await create_mail()
+
+    cur.execute("REPLACE INTO users VALUES (?,?)",(q.from_user.id,email))
     db.commit()
 
-    await q.message.edit_text(panel(email), parse_mode="Markdown", reply_markup=main_kb())
+    await q.message.edit_text(panel(email),
+        parse_mode="Markdown",
+        reply_markup=kb()
+    )
 
 # ================= MAIN =================
 def main():
@@ -222,9 +211,9 @@ def main():
     app.add_handler(CallbackQueryHandler(refresh, pattern="refresh"))
     app.add_handler(CallbackQueryHandler(new, pattern="new"))
 
-    app.job_queue.run_repeating(global_notify, 5)
+    app.job_queue.run_repeating(global_notify, 3)
 
-    print("🔥 REAL TEMP MAIL BOT RUNNING")
+    print("🔥 NEW API BOT RUNNING")
     app.run_polling()
 
 if __name__ == "__main__":

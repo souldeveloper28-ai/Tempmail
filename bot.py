@@ -19,13 +19,12 @@ db.commit()
 
 session = None
 
-# ================= INIT / CLOSE SESSION =================
-async def init_session(app: Application):
+# ================= SESSION =================
+async def init_session(app):
     global session
     session = aiohttp.ClientSession()
 
-async def close_session(app: Application):
-    global session
+async def close_session(app):
     if session:
         await session.close()
 
@@ -45,9 +44,7 @@ def log(uid, action):
 # ================= AI =================
 def ai(text):
     otp = re.findall(r"\b\d{4,8}\b", text)
-    category = "OTP" if otp else "GENERAL"
-    summary = text[:80]
-    return otp[0] if otp else None, category, summary
+    return otp[0] if otp else None
 
 # ================= CREATE MAIL =================
 async def create_mail():
@@ -68,29 +65,31 @@ async def create_mail():
 # ================= UI =================
 def panel(email, count=0):
     return f"""
-╔══════════════════════════════════════╗
-║ ⚡ YASH GOD CORE SYSTEM ⚡           ║
-╠══════════════════════════════════════╣
+╔═══🌈 NEON CYBER CORE 🌈═══╗
+║ 🟢 STATUS ➤ ONLINE
 ║ 📧 `{email}`
-║ 📥 Inbox : {count}
-║ ⚡ Mode   : FULL POWER
-╠══════════════════════════════════════╣
-║ 🧠 AI SYSTEM : ACTIVE
-║ 🚀 SPEED     : EXTREME
-║ 🔐 SECURITY  : MAX
-╠══════════════════════════════════════╣
-║ 👑 KING CONTROL ENABLED
-╚══════════════════════════════════════╝
+║ 📥 MAILS ➤ {count}
+╠═══════════════════════════╣
+║ 🧠 AI ➤ ACTIVE
+║ 🚀 SPEED ➤ MAX
+║ 🔐 SECURITY ➤ LOCKED
+╠═══════════════════════════╣
+║ 📩 MAIL TRACK ✔
+║ 🔍 OTP SCAN ✔
+║ ⚡ AUTO FETCH ✔
+╠═══════════════════════════╣
+║ 👑 YASH SYSTEM
+╚═══════════════════════════╝
 """
 
 def kb():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📩 Inbox", callback_data="inbox"),
-         InlineKeyboardButton("⚡ New", callback_data="new")],
-        [InlineKeyboardButton("🔄 Refresh", callback_data="refresh"),
-         InlineKeyboardButton("🚀 Boost", callback_data="boost")],
-        [InlineKeyboardButton("📊 Logs", callback_data="logs"),
-         InlineKeyboardButton("⚙️ Admin", callback_data="admin_login")]
+        [InlineKeyboardButton("📩 INBOX", callback_data="inbox"),
+         InlineKeyboardButton("⚡ NEW", callback_data="new")],
+        [InlineKeyboardButton("🔄 REFRESH", callback_data="refresh"),
+         InlineKeyboardButton("🚀 BOOST", callback_data="boost")],
+        [InlineKeyboardButton("📊 LOGS", callback_data="logs"),
+         InlineKeyboardButton("👑 ADMIN", callback_data="admin_login")]
     ])
 
 # ================= START =================
@@ -114,7 +113,6 @@ async def global_notify(context):
     for uid, token in users:
         try:
             async with session.get(f"{API}/messages", headers={"Authorization": f"Bearer {token}"}) as r:
-                if r.status != 200: continue
                 data = await r.json()
         except:
             continue
@@ -128,62 +126,77 @@ async def global_notify(context):
             cur.execute("INSERT INTO seen VALUES (?,?)",(uid,mid))
             db.commit()
 
-            otp, cat, _ = ai(m.get("subject",""))
+            async with session.get(f"{API}/messages/{mid}",
+                headers={"Authorization": f"Bearer {token}"}) as r:
+                full = await r.json()
 
-            msg = f"📩 NEW MAIL\n📌 {m['subject']}\n🧠 {cat}"
+            body = full.get("text") or full.get("html","")
+            otp = ai(body)
+
+            msg = f"""
+╔═══📡 NEON MAIL═══╗
+║ 👤 {full['from']['address']}
+║ 📌 {full['subject']}
+"""
+
             if otp:
-                msg += f"\n🔐 OTP: {otp}"
+                msg += f"\n║ 🔐 OTP ➤ `⚡ {otp} ⚡`"
 
-            await context.bot.send_message(uid, msg)
+            msg += f"\n║ 📜 {body[:200]}\n╚══════════════════╝"
 
-        await asyncio.sleep(0.3)
+            await context.bot.send_message(uid, msg, parse_mode="Markdown")
 
-# ================= BUTTONS =================
+        await asyncio.sleep(0.5)
+
+# ================= INBOX =================
 async def inbox(update, context):
     q = update.callback_query
     await q.answer()
+
     u = get_user(q.from_user.id)
 
-    async with session.get(f"{API}/messages", headers={"Authorization": f"Bearer {u['token']}"}) as r:
+    async with session.get(f"{API}/messages",
+        headers={"Authorization": f"Bearer {u['token']}"}) as r:
         data = await r.json()
 
-    text = "📩 Inbox:\n"
-    for m in data.get("hydra:member", [])[:10]:
-        text += f"• {m['subject'][:30]}\n"
+    msgs = data.get("hydra:member", [])[:5]
 
-    await q.message.edit_text(text)
+    buttons = []
+    for m in msgs:
+        buttons.append([InlineKeyboardButton(
+            m['subject'][:30],
+            callback_data=f"read_{m['id']}"
+        )])
 
-async def refresh(update, context):
+    await q.message.edit_text("📩 Select Mail:", reply_markup=InlineKeyboardMarkup(buttons))
+
+# ================= READ MAIL =================
+async def read_mail(update, context):
     q = update.callback_query
     await q.answer()
+
+    mid = q.data.split("_")[1]
     u = get_user(q.from_user.id)
 
-    async with session.get(f"{API}/messages", headers={"Authorization": f"Bearer {u['token']}"}) as r:
-        data = await r.json()
+    async with session.get(f"{API}/messages/{mid}",
+        headers={"Authorization": f"Bearer {u['token']}"}) as r:
+        full = await r.json()
 
-    await q.message.edit_text(panel(u['email'], len(data.get("hydra:member", []))),
-                              parse_mode="Markdown", reply_markup=kb())
+    body = full.get("text") or full.get("html","")
+    otp = ai(body)
 
-async def new(update, context):
-    q = update.callback_query
-    await q.answer()
+    msg = f"""
+📂 FULL MAIL
+👤 {full['from']['address']}
+📌 {full['subject']}
+"""
 
-    email, token = await create_mail()
-    cur.execute("REPLACE INTO users VALUES (?,?,?)",(q.from_user.id,email,token))
-    db.commit()
+    if otp:
+        msg += f"\n🔐 OTP: `⚡ {otp} ⚡`"
 
-    await q.message.edit_text(panel(email), parse_mode="Markdown", reply_markup=kb())
+    msg += f"\n\n{body[:3000]}"
 
-async def boost(update, context):
-    q = update.callback_query
-    await q.answer()
-
-    msg = await q.message.edit_text("⚡ BOOSTING...")
-    for s in ["INIT","AI","SYNC","MAX","DONE"]:
-        await asyncio.sleep(0.3)
-        await msg.edit_text(s)
-
-    await refresh(update, context)
+    await q.message.edit_text(msg, parse_mode="Markdown")
 
 # ================= ADMIN =================
 def admin_kb():
@@ -191,8 +204,8 @@ def admin_kb():
         [InlineKeyboardButton("📊 Stats", callback_data="stats"),
          InlineKeyboardButton("👥 Users", callback_data="users")],
         [InlineKeyboardButton("📢 Broadcast", callback_data="broadcast"),
-         InlineKeyboardButton("🚫 Ban", callback_data="ban")],
-        [InlineKeyboardButton("⚡ Force", callback_data="force"),
+         InlineKeyboardButton("⚡ Force", callback_data="force")],
+        [InlineKeyboardButton("🚫 Ban", callback_data="ban"),
          InlineKeyboardButton("🗑 Reset", callback_data="reset")],
         [InlineKeyboardButton("🚪 Logout", callback_data="logout")]
     ])
@@ -208,7 +221,7 @@ def is_admin(context):
 async def admin_login(update, context):
     q = update.callback_query
     await q.answer()
-    await q.message.reply_text("🔐 Enter Password:")
+    await q.message.reply_text("Enter password:")
     context.user_data["admin_login"] = True
 
 async def handle_msg(update, context):
@@ -234,7 +247,6 @@ async def handle_msg(update, context):
                 await context.bot.send_message(u[0], text)
             except: pass
         context.user_data["broadcast"] = False
-        await update.message.reply_text("✅ Done")
 
     if context.user_data.get("force") and is_admin(context):
         cur.execute("SELECT uid FROM users")
@@ -248,80 +260,6 @@ async def handle_msg(update, context):
         cur.execute("DELETE FROM users WHERE uid=?", (int(text),))
         db.commit()
         context.user_data["ban"] = False
-        await update.message.reply_text("🚫 Banned")
-
-# ================= ADMIN BUTTONS =================
-async def stats(update, context):
-    if not is_admin(context): return
-    q = update.callback_query
-    await q.answer()
-
-    cur.execute("SELECT COUNT(*) FROM users")
-    users = cur.fetchone()[0]
-
-    cur.execute("SELECT COUNT(*) FROM logs")
-    logs = cur.fetchone()[0]
-
-    await q.message.edit_text(f"👥 Users: {users}\n📊 Logs: {logs}", reply_markup=admin_kb())
-
-async def users(update, context):
-    if not is_admin(context): return
-    q = update.callback_query
-    await q.answer()
-
-    cur.execute("SELECT uid FROM users")
-    data = cur.fetchall()
-
-    txt = "\n".join(str(u[0]) for u in data[:20])
-    await q.message.edit_text(txt, reply_markup=admin_kb())
-
-async def broadcast(update, context):
-    if not is_admin(context): return
-    q = update.callback_query
-    await q.answer()
-    context.user_data["broadcast"] = True
-    await q.message.reply_text("Send broadcast msg")
-
-async def force(update, context):
-    if not is_admin(context): return
-    q = update.callback_query
-    await q.answer()
-    context.user_data["force"] = True
-    await q.message.reply_text("Send force msg")
-
-async def ban(update, context):
-    if not is_admin(context): return
-    q = update.callback_query
-    await q.answer()
-    context.user_data["ban"] = True
-    await q.message.reply_text("Send user id")
-
-async def reset(update, context):
-    if not is_admin(context): return
-    q = update.callback_query
-    await q.answer()
-
-    cur.execute("DELETE FROM users")
-    cur.execute("DELETE FROM seen")
-    db.commit()
-
-    await q.message.edit_text("💀 RESET DONE", reply_markup=admin_kb())
-
-async def logout(update, context):
-    q = update.callback_query
-    await q.answer()
-    context.user_data["is_admin"] = False
-    await q.message.edit_text("🔒 Logout")
-
-async def logs(update, context):
-    q = update.callback_query
-    await q.answer()
-
-    cur.execute("SELECT * FROM logs ORDER BY ROWID DESC LIMIT 10")
-    data = cur.fetchall()
-
-    txt = "\n".join(f"{d[0]} → {d[1]}" for d in data)
-    await q.message.edit_text(txt)
 
 # ================= MAIN =================
 def main():
@@ -332,25 +270,17 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(inbox, pattern="inbox"))
+    app.add_handler(CallbackQueryHandler(read_mail, pattern="read_"))
     app.add_handler(CallbackQueryHandler(refresh, pattern="refresh"))
     app.add_handler(CallbackQueryHandler(new, pattern="new"))
     app.add_handler(CallbackQueryHandler(boost, pattern="boost"))
-    app.add_handler(CallbackQueryHandler(logs, pattern="logs"))
-
     app.add_handler(CallbackQueryHandler(admin_login, pattern="admin_login"))
-    app.add_handler(CallbackQueryHandler(stats, pattern="stats"))
-    app.add_handler(CallbackQueryHandler(users, pattern="users"))
-    app.add_handler(CallbackQueryHandler(broadcast, pattern="broadcast"))
-    app.add_handler(CallbackQueryHandler(force, pattern="force"))
-    app.add_handler(CallbackQueryHandler(ban, pattern="ban"))
-    app.add_handler(CallbackQueryHandler(reset, pattern="reset"))
-    app.add_handler(CallbackQueryHandler(logout, pattern="logout"))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_msg))
 
-    app.job_queue.run_repeating(global_notify, 4)
+    app.job_queue.run_repeating(global_notify, 5)
 
-    print("🔥 FINAL SYSTEM RUNNING")
+    print("🔥 NEON GOD SYSTEM RUNNING")
     app.run_polling()
 
 if __name__ == "__main__":

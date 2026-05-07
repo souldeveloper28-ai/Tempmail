@@ -2,7 +2,7 @@ import aiohttp, asyncio, random, string, sqlite3, re, os
 from telegram import *
 from telegram.ext import *
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = "8197088992:AAGqHtWkAxyiiFRxMNlU2HTv7qKhNmurWtw"
 API = "https://api.mail.tm"
 
 # ================= DB =================
